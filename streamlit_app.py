@@ -1,290 +1,334 @@
-from collections import defaultdict
+import io
+import re
 from pathlib import Path
-import sqlite3
 
-import streamlit as st
-import altair as alt
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import streamlit as st
 
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
+from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, RobustScaler, StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title="Inventory tracker",
-    page_icon=":shopping_bags:",  # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(page_title="ML Pipeline Builder", page_icon="🤖", layout="wide")
+st.title("🤖 ML Pipeline Builder & Evaluator")
+st.caption("CSV-/Excel-Upload, ID-Spaltenerkennung, Train/Test-Split, Scikit-Learn-Pipelines und visuelle Evaluation.")
 
-
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-
-def connect_db():
-    """Connects to the sqlite database."""
-
-    DB_FILENAME = Path(__file__).parent / "inventory.db"
-    db_already_exists = DB_FILENAME.exists()
-
-    conn = sqlite3.connect(DB_FILENAME)
-    db_was_just_created = not db_already_exists
-
-    return conn, db_was_just_created
-
-
-def initialize_data(conn):
-    """Initializes the inventory table with some data."""
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_name TEXT,
-            price REAL,
-            units_sold INTEGER,
-            units_left INTEGER,
-            cost_price REAL,
-            reorder_point INTEGER,
-            description TEXT
-        )
-        """
+def looks_like_bad_header(columns):
+    columns = [str(col).strip() for col in columns]
+    if not columns:
+        return False
+    suspicious = sum(
+        1 for col in columns
+        if col.lower().startswith("unnamed:")
+        or re.fullmatch(r"column[_ ]?\d+", col.lower())
+        or re.fullmatch(r"\d+", col.lower())
+        or col.lower() in {"", "nan", "none", "null"}
     )
+    return suspicious / len(columns) >= 0.8
 
-    cursor.execute(
-        """
-        INSERT INTO inventory
-            (item_name, price, units_sold, units_left, cost_price, reorder_point, description)
-        VALUES
-            -- Beverages
-            ('Bottled Water (500ml)', 1.50, 115, 15, 0.80, 16, 'Hydrating bottled water'),
-            ('Soda (355ml)', 2.00, 93, 8, 1.20, 10, 'Carbonated soft drink'),
-            ('Energy Drink (250ml)', 2.50, 12, 18, 1.50, 8, 'High-caffeine energy drink'),
-            ('Coffee (hot, large)', 2.75, 11, 14, 1.80, 5, 'Freshly brewed hot coffee'),
-            ('Juice (200ml)', 2.25, 11, 9, 1.30, 5, 'Fruit juice blend'),
-
-            -- Snacks
-            ('Potato Chips (small)', 2.00, 34, 16, 1.00, 10, 'Salted and crispy potato chips'),
-            ('Candy Bar', 1.50, 6, 19, 0.80, 15, 'Chocolate and candy bar'),
-            ('Granola Bar', 2.25, 3, 12, 1.30, 8, 'Healthy and nutritious granola bar'),
-            ('Cookies (pack of 6)', 2.50, 8, 8, 1.50, 5, 'Soft and chewy cookies'),
-            ('Fruit Snack Pack', 1.75, 5, 10, 1.00, 8, 'Assortment of dried fruits and nuts'),
-
-            -- Personal Care
-            ('Toothpaste', 3.50, 1, 9, 2.00, 5, 'Minty toothpaste for oral hygiene'),
-            ('Hand Sanitizer (small)', 2.00, 2, 13, 1.20, 8, 'Small sanitizer bottle for on-the-go'),
-            ('Pain Relievers (pack)', 5.00, 1, 5, 3.00, 3, 'Over-the-counter pain relief medication'),
-            ('Bandages (box)', 3.00, 0, 10, 2.00, 5, 'Box of adhesive bandages for minor cuts'),
-            ('Sunscreen (small)', 5.50, 6, 5, 3.50, 3, 'Small bottle of sunscreen for sun protection'),
-
-            -- Household
-            ('Batteries (AA, pack of 4)', 4.00, 1, 5, 2.50, 3, 'Pack of 4 AA batteries'),
-            ('Light Bulbs (LED, 2-pack)', 6.00, 3, 3, 4.00, 2, 'Energy-efficient LED light bulbs'),
-            ('Trash Bags (small, 10-pack)', 3.00, 5, 10, 2.00, 5, 'Small trash bags for everyday use'),
-            ('Paper Towels (single roll)', 2.50, 3, 8, 1.50, 5, 'Single roll of paper towels'),
-            ('Multi-Surface Cleaner', 4.50, 2, 5, 3.00, 3, 'All-purpose cleaning spray'),
-
-            -- Others
-            ('Lottery Tickets', 2.00, 17, 20, 1.50, 10, 'Assorted lottery tickets'),
-            ('Newspaper', 1.50, 22, 20, 1.00, 5, 'Daily newspaper')
-        """
-    )
-    conn.commit()
-
-
-def load_data(conn):
-    """Loads the inventory data from the database."""
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute("SELECT * FROM inventory")
-        data = cursor.fetchall()
-    except:
-        return None
-
-    df = pd.DataFrame(
-        data,
-        columns=[
-            "id",
-            "item_name",
-            "price",
-            "units_sold",
-            "units_left",
-            "cost_price",
-            "reorder_point",
-            "description",
-        ],
-    )
-
+def fix_misplaced_header(df):
+    if looks_like_bad_header(df.columns) and not df.empty:
+        first_row = df.iloc[0].astype(str).str.strip().tolist()
+        if all(first_row) and len(first_row) == len(set(first_row)):
+            df = df.iloc[1:].copy()
+            df.columns = first_row
+            df.reset_index(drop=True, inplace=True)
     return df
 
+def detect_id_columns(df):
+    id_cols = []
+    for col in df.columns:
+        name = str(col).lower()
+        if name == "id" or name.endswith("_id") or name.startswith("id_") or "uuid" in name:
+            id_cols.append(col)
+        elif df[col].nunique(dropna=True) / max(len(df), 1) >= 0.98 and not pd.api.types.is_numeric_dtype(df[col]):
+            id_cols.append(col)
+    return id_cols
 
-def update_data(conn, df, changes):
-    """Updates the inventory data in the database."""
-    cursor = conn.cursor()
+@st.cache_data(show_spinner=False)
+def get_sheet_names(data):
+    return pd.ExcelFile(io.BytesIO(data)).sheet_names
 
-    if changes["edited_rows"]:
-        deltas = st.session_state.inventory_table["edited_rows"]
-        rows = []
+@st.cache_data(show_spinner=False)
+def load_file(data, filename, sheet_name=None):
+    ext = Path(filename).suffix.lower()
+    if ext == ".csv":
+        try:
+            df = pd.read_csv(io.BytesIO(data), encoding="utf-8")
+        except UnicodeDecodeError:
+            df = pd.read_csv(io.BytesIO(data), encoding="cp1252")
+    elif ext in {".xlsx", ".xls"}:
+        df = pd.read_excel(io.BytesIO(data), sheet_name=sheet_name)
+    else:
+        raise ValueError(f"Nicht unterstütztes Format: {ext}")
+    return fix_misplaced_header(df)
 
-        for i, delta in deltas.items():
-            row_dict = df.iloc[i].to_dict()
-            row_dict.update(delta)
-            rows.append(row_dict)
+def resolve_task(df, target_col, requested):
+    if requested != "Auto-Detect":
+        return requested
+    target = df[target_col]
+    if pd.api.types.is_numeric_dtype(target) and target.nunique(dropna=True) > 15:
+        return "Regression"
+    return "Classification"
 
-        cursor.executemany(
-            """
-            UPDATE inventory
-            SET
-                item_name = :item_name,
-                price = :price,
-                units_sold = :units_sold,
-                units_left = :units_left,
-                cost_price = :cost_price,
-                reorder_point = :reorder_point,
-                description = :description
-            WHERE id = :id
-            """,
-            rows,
+def make_estimator(model_name, seed, hp):
+    if model_name == "Logistic Regression":
+        return LogisticRegression(C=hp.get("C", 1.0), max_iter=1000, random_state=seed)
+    if model_name == "KNN":
+        return KNeighborsClassifier(n_neighbors=hp.get("k", 5))
+    if model_name == "Decision Tree":
+        return DecisionTreeClassifier(max_depth=hp.get("max_depth", 10), random_state=seed)
+    if model_name == "Random Forest":
+        return RandomForestClassifier(max_depth=hp.get("max_depth", 10), n_estimators=hp.get("n_estimators", 100), random_state=seed)
+    if model_name == "Linear Regression":
+        return LinearRegression()
+    if model_name == "Ridge":
+        return Ridge(alpha=hp.get("alpha", 1.0))
+    if model_name == "Random Forest Regressor":
+        return RandomForestRegressor(max_depth=hp.get("max_depth", 10), n_estimators=hp.get("n_estimators", 100), random_state=seed)
+    raise ValueError("Unbekanntes Modell")
+
+def build_production_code(num_cols, cat_cols, target_col, test_size, seed, use_stratify, scaler_name, imputer_strategy, estimator):
+    stratify_text = ", stratify=y" if use_stratify else ""
+    lines = [
+        "import pandas as pd",
+        "from sklearn.pipeline import Pipeline",
+        "from sklearn.compose import ColumnTransformer",
+        f"from sklearn.preprocessing import {scaler_name}, OneHotEncoder",
+        "from sklearn.impute import SimpleImputer",
+        "from sklearn.model_selection import train_test_split",
+        f"from {estimator.__class__.__module__} import {estimator.__class__.__name__}",
+        "",
+        f"num_features = {num_cols!r}",
+        f"cat_features = {cat_cols!r}",
+        f"target = {target_col!r}",
+        "",
+        "X = df[num_features + cat_features]",
+        "y = df[target]",
+        f"X_train, X_test, y_train, y_test = train_test_split(X, y, test_size={test_size}, random_state={seed}{stratify_text})",
+        "",
+        "num_transformer = Pipeline([",
+        f"    ('imputer', SimpleImputer(strategy={imputer_strategy!r})),",
+        f"    ('scaler', {scaler_name}())",
+        "])",
+        "cat_transformer = Pipeline([",
+        "    ('imputer', SimpleImputer(strategy='most_frequent')),",
+        "    ('encoder', OneHotEncoder(handle_unknown='ignore'))",
+        "])",
+        "",
+        "preprocessor = ColumnTransformer(transformers=[",
+        "    ('num', num_transformer, num_features),",
+        "    ('cat', cat_transformer, cat_features)",
+        "])",
+        "",
+        "pipeline = Pipeline([",
+        "    ('preprocessor', preprocessor),",
+        f"    ('model', {estimator!r})",
+        "])",
+        "",
+        "pipeline.fit(X_train, y_train)",
+        "score = pipeline.score(X_test, y_test)",
+    ]
+    return "\n".join(lines)
+
+uploaded = st.file_uploader("CSV- oder Excel-Datei hochladen", type=["csv", "xlsx", "xls"])
+if uploaded is None:
+    st.info("Bitte eine CSV- oder Excel-Datei hochladen.")
+    st.stop()
+
+data = uploaded.getvalue()
+ext = Path(uploaded.name).suffix.lower()
+sheet = None
+
+if ext in {".xlsx", ".xls"}:
+    sheet = st.selectbox("Excel-Tabellenblatt", get_sheet_names(data))
+
+try:
+    df_raw = load_file(data, uploaded.name, sheet)
+except Exception as exc:
+    st.error(f"Datei konnte nicht geladen werden: {exc}")
+    st.stop()
+
+id_cols = detect_id_columns(df_raw)
+m1, m2, m3 = st.columns(3)
+m1.metric("Zeilen", len(df_raw))
+m2.metric("Spalten", len(df_raw.columns))
+m3.metric("Erkannte ID-Spalten", len(id_cols))
+
+if id_cols:
+    st.info("Erkannte ID-Spalten: " + ", ".join(map(str, id_cols)))
+
+with st.expander("Datenvorschau", expanded=True):
+    st.dataframe(df_raw.head(50), use_container_width=True)
+
+st.divider()
+st.subheader("Pipeline konfigurieren")
+left, right = st.columns(2)
+
+with left:
+    target_col = st.selectbox("Target (y)", list(df_raw.columns))
+    feature_options = [c for c in df_raw.columns if c != target_col]
+    default_features = [c for c in feature_options if c not in id_cols]
+    feature_cols = st.multiselect("Features (X)", feature_options, default=default_features)
+    task_request = st.selectbox("Task", ["Auto-Detect", "Classification", "Regression"])
+
+task = resolve_task(df_raw, target_col, task_request)
+
+with right:
+    test_size = st.slider("Test Size", 0.10, 0.50, 0.20, 0.05)
+    seed = int(st.number_input("Random Seed", min_value=0, value=42, step=1))
+    stratify_requested = st.checkbox("Stratify Split (Klassifikation)", value=True, disabled=(task == "Regression"))
+    scaler_name = st.selectbox("Scaler", ["StandardScaler", "RobustScaler", "MinMaxScaler"])
+    imputer_strategy = st.selectbox("Numerischer Imputer", ["median", "mean"])
+
+models = (
+    ["Logistic Regression", "KNN", "Decision Tree", "Random Forest"]
+    if task == "Classification"
+    else ["Linear Regression", "Ridge", "Random Forest Regressor"]
+)
+model_name = st.selectbox("Modell", models)
+
+hp = {}
+if model_name == "Logistic Regression":
+    hp["C"] = st.number_input("C (Regularisierung)", min_value=0.001, max_value=1000.0, value=1.0)
+elif model_name == "KNN":
+    hp["k"] = st.slider("k (Neighbors)", 1, 30, 5)
+elif model_name in {"Decision Tree", "Random Forest", "Random Forest Regressor"}:
+    hp["max_depth"] = st.slider("Max Depth", 1, 50, 10)
+    if "Random Forest" in model_name:
+        hp["n_estimators"] = st.slider("Estimators", 10, 300, 100, 10)
+elif model_name == "Ridge":
+    hp["alpha"] = st.number_input("Alpha", min_value=0.001, max_value=1000.0, value=1.0)
+
+st.caption(f"Aufgelöster Task: **{task}**")
+
+if st.button("Train Pipeline & Evaluate", type="primary", use_container_width=True):
+    if not feature_cols:
+        st.error("Mindestens ein Feature muss ausgewählt werden.")
+        st.stop()
+
+    df = df_raw.dropna(subset=[target_col]).copy()
+    X = df[feature_cols]
+    y = df[target_col]
+
+    use_stratify = (
+        stratify_requested
+        and task == "Classification"
+        and not y.value_counts().empty
+        and y.value_counts().min() >= 2
+    )
+
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=float(test_size), random_state=seed,
+            stratify=y if use_stratify else None
         )
 
-    if changes["added_rows"]:
-        cursor.executemany(
-            """
-            INSERT INTO inventory
-                (id, item_name, price, units_sold, units_left, cost_price, reorder_point, description)
-            VALUES
-                (:id, :item_name, :price, :units_sold, :units_left, :cost_price, :reorder_point, :description)
-            """,
-            (defaultdict(lambda: None, row) for row in changes["added_rows"]),
-        )
+        num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    if changes["deleted_rows"]:
-        cursor.executemany(
-            "DELETE FROM inventory WHERE id = :id",
-            ({"id": int(df.loc[i, "id"])} for i in changes["deleted_rows"]),
-        )
+        scaler = {
+            "StandardScaler": StandardScaler(),
+            "RobustScaler": RobustScaler(),
+            "MinMaxScaler": MinMaxScaler(),
+        }[scaler_name]
 
-    conn.commit()
+        num_pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy=imputer_strategy)),
+            ("scaler", scaler),
+        ])
+        cat_pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ])
 
+        transformers = []
+        if num_cols:
+            transformers.append(("num", num_pipe, num_cols))
+        if cat_cols:
+            transformers.append(("cat", cat_pipe, cat_cols))
 
-# -----------------------------------------------------------------------------
-# Draw the actual page, starting with the inventory table.
+        preprocessor = ColumnTransformer(transformers=transformers)
+        estimator = make_estimator(model_name, seed, hp)
+        pipeline = Pipeline([("preprocessor", preprocessor), ("model", estimator)])
 
-# Set the title that appears at the top of the page.
-"""
-# :shopping_bags: Inventory tracker
+        with st.spinner("Pipeline wird trainiert ..."):
+            pipeline.fit(X_train, y_train)
+            y_pred = pipeline.predict(X_test)
+    except Exception as exc:
+        st.error(f"Training fehlgeschlagen: {exc}")
+        st.stop()
 
-**Welcome to Alice's Corner Store's intentory tracker!**
-This page reads and writes directly from/to our inventory database.
-"""
+    st.success("Training abgeschlossen.")
 
-st.info(
-    """
-    Use the table below to add, remove, and edit items.
-    And don't forget to commit your changes when you're done.
-    """
-)
+    st.subheader("Train / Test Split")
+    st.dataframe(pd.DataFrame([
+        {"Split": "Train Set", "Rows": len(X_train), "Features": X_train.shape[1], "Share": f"{1-test_size:.0%}"},
+        {"Split": "Test Set", "Rows": len(X_test), "Features": X_test.shape[1], "Share": f"{test_size:.0%}"},
+    ]), hide_index=True, use_container_width=True)
+    st.caption(f"Random State: {seed} · Stratified: {use_stratify}")
 
-# Connect to database and create table if needed
-conn, db_was_just_created = connect_db()
+    st.subheader(f"Evaluation: {task}")
+    st.write(f"**Modell:** {model_name}")
+    st.write(f"**Features:** {len(feature_cols)} ({len(num_cols)} numerisch, {len(cat_cols)} kategorial)")
 
-# Initialize data.
-if db_was_just_created:
-    initialize_data(conn)
-    st.toast("Database initialized with some sample data.")
+    if task == "Classification":
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        st.dataframe(pd.DataFrame(report).T, use_container_width=True)
 
-# Load data from database
-df = load_data(conn)
+        labels = np.unique(np.concatenate([np.asarray(y_test), np.asarray(y_pred)]))
+        cm = confusion_matrix(y_test, y_pred, labels=labels)
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(cm)
+        ax.set_xticks(range(len(labels)), labels=labels, rotation=45, ha="right")
+        ax.set_yticks(range(len(labels)), labels=labels)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_title("Confusion Matrix")
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, str(cm[i, j]), ha="center", va="center")
+        fig.colorbar(im, ax=ax)
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+    else:
+        metrics = pd.DataFrame([{
+            "R² Score": r2_score(y_test, y_pred),
+            "MAE": mean_absolute_error(y_test, y_pred),
+            "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
+        }]).round(3)
+        st.dataframe(metrics, hide_index=True, use_container_width=True)
 
-# Display data with editable table
-edited_df = st.data_editor(
-    df,
-    disabled=["id"],  # Don't allow editing the 'id' column.
-    num_rows="dynamic",  # Allow appending/deleting rows.
-    column_config={
-        # Show dollar sign before price columns.
-        "price": st.column_config.NumberColumn(format="$%.2f"),
-        "cost_price": st.column_config.NumberColumn(format="$%.2f"),
-    },
-    key="inventory_table",
-)
+        residuals = y_test - y_pred
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.scatter(y_pred, residuals, alpha=0.4)
+        ax.axhline(0, linestyle="--")
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Residuals")
+        ax.set_title("Residual Plot")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
 
-has_uncommitted_changes = any(len(v) for v in st.session_state.inventory_table.values())
-
-st.button(
-    "Commit changes",
-    type="primary",
-    disabled=not has_uncommitted_changes,
-    # Update data in database
-    on_click=update_data,
-    args=(conn, df, st.session_state.inventory_table),
-)
-
-
-# -----------------------------------------------------------------------------
-# Now some cool charts
-
-# Add some space
-""
-""
-""
-
-st.subheader("Units left", divider="red")
-
-need_to_reorder = df[df["units_left"] < df["reorder_point"]].loc[:, "item_name"]
-
-if len(need_to_reorder) > 0:
-    items = "\n".join(f"* {name}" for name in need_to_reorder)
-
-    st.error(f"We're running dangerously low on the items below:\n {items}")
-
-""
-""
-
-st.altair_chart(
-    # Layer 1: Bar chart.
-    alt.Chart(df)
-    .mark_bar(
-        orient="horizontal",
+    code = build_production_code(
+        num_cols, cat_cols, target_col, float(test_size), seed,
+        use_stratify, scaler_name, imputer_strategy, estimator
     )
-    .encode(
-        x="units_left",
-        y="item_name",
+    st.subheader("Produktions-Code")
+    st.code(code, language="python")
+    st.download_button(
+        "Produktions-Code herunterladen",
+        data=code,
+        file_name="trained_pipeline_template.py",
+        mime="text/x-python",
     )
-    # Layer 2: Chart showing the reorder point.
-    + alt.Chart(df)
-    .mark_point(
-        shape="diamond",
-        filled=True,
-        size=50,
-        color="salmon",
-        opacity=1,
-    )
-    .encode(
-        x="reorder_point",
-        y="item_name",
-    ),
-    use_container_width=True,
-)
-
-st.caption("NOTE: The :diamonds: location shows the reorder point.")
-
-""
-""
-""
-
-# -----------------------------------------------------------------------------
-
-st.subheader("Best sellers", divider="orange")
-
-""
-""
-
-st.altair_chart(
-    alt.Chart(df)
-    .mark_bar(orient="horizontal")
-    .encode(
-        x="units_sold",
-        y=alt.Y("item_name").sort("-x"),
-    ),
-    use_container_width=True,
-)
