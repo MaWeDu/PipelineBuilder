@@ -733,3 +733,220 @@ if st.button("Train Pipeline & Evaluate", type="primary", width="stretch"):
     st.write(f"**Kategoriale Features:** {', '.join(map(str, cat_cols)) or 'Keine'}")
     st.write(f"**Scaler:** {scaler_name}")
     st.write(f"**Imputer:** {imputer_strategy}")
+
+
+    # -------------------------------------------------------------------------
+    # 9. Vollständiger, kopierbarer Pipeline- und Modellcode
+    # -------------------------------------------------------------------------
+    st.subheader("9. Vollständiger Pipeline- und Modellcode")
+    st.caption(
+        "Dieser Code bildet die aktuell gewählte Pipeline inklusive Modell ab."
+    )
+
+    effective_hp = dict(hp)
+    if best_params:
+        mapping = {
+            "model__C": "C",
+            "model__n_neighbors": "k",
+            "model__max_depth": "max_depth",
+            "model__min_samples_split": "min_samples_split",
+            "model__n_estimators": "n_estimators",
+            "model__alpha": "alpha",
+        }
+        for key, value in best_params.items():
+            if key in mapping:
+                effective_hp[mapping[key]] = value
+
+    scaler_code = {
+        "StandardScaler": "StandardScaler()",
+        "RobustScaler": "RobustScaler()",
+        "MinMaxScaler": "MinMaxScaler()",
+    }[scaler_name]
+
+    if model_name == "Logistic Regression":
+        model_import = "from sklearn.linear_model import LogisticRegression"
+        model_code = (
+            f"LogisticRegression(C={effective_hp.get('C', 1.0)!r}, "
+            f"max_iter=2000, random_state={seed})"
+        )
+    elif model_name == "KNN":
+        model_import = "from sklearn.neighbors import KNeighborsClassifier"
+        model_code = f"KNeighborsClassifier(n_neighbors={effective_hp.get('k', 5)!r})"
+    elif model_name == "Decision Tree":
+        model_import = "from sklearn.tree import DecisionTreeClassifier"
+        args = [f"max_depth={effective_hp.get('max_depth', 10)!r}"]
+        if "min_samples_split" in effective_hp:
+            args.append(f"min_samples_split={effective_hp['min_samples_split']!r}")
+        args.append(f"random_state={seed}")
+        model_code = "DecisionTreeClassifier(" + ", ".join(args) + ")"
+    elif model_name == "Random Forest":
+        model_import = "from sklearn.ensemble import RandomForestClassifier"
+        args = [
+            f"n_estimators={effective_hp.get('n_estimators', 100)!r}",
+            f"max_depth={effective_hp.get('max_depth', 10)!r}",
+        ]
+        if "min_samples_split" in effective_hp:
+            args.append(f"min_samples_split={effective_hp['min_samples_split']!r}")
+        args.append(f"random_state={seed}")
+        model_code = "RandomForestClassifier(" + ", ".join(args) + ")"
+    elif model_name == "Linear Regression":
+        model_import = "from sklearn.linear_model import LinearRegression"
+        model_code = "LinearRegression()"
+    elif model_name == "Ridge":
+        model_import = "from sklearn.linear_model import Ridge"
+        model_code = f"Ridge(alpha={effective_hp.get('alpha', 1.0)!r})"
+    else:
+        model_import = "from sklearn.ensemble import RandomForestRegressor"
+        args = [
+            f"n_estimators={effective_hp.get('n_estimators', 100)!r}",
+            f"max_depth={effective_hp.get('max_depth', 10)!r}",
+        ]
+        if "min_samples_split" in effective_hp:
+            args.append(f"min_samples_split={effective_hp['min_samples_split']!r}")
+        args.append(f"random_state={seed}")
+        model_code = "RandomForestRegressor(" + ", ".join(args) + ")"
+
+    if task == "Classification":
+        metric_import = (
+            "from sklearn.metrics import (accuracy_score, balanced_accuracy_score, "
+            "precision_score, recall_score, f1_score, classification_report, confusion_matrix)"
+        )
+        evaluation_lines = [
+            'print("Accuracy:", accuracy_score(y_test, y_pred))',
+            'print("Balanced Accuracy:", balanced_accuracy_score(y_test, y_pred))',
+            'print("Precision:", precision_score(y_test, y_pred, average="weighted", zero_division=0))',
+            'print("Recall:", recall_score(y_test, y_pred, average="weighted", zero_division=0))',
+            'print("F1:", f1_score(y_test, y_pred, average="weighted", zero_division=0))',
+            'print("\\nClassification Report:")',
+            'print(classification_report(y_test, y_pred, zero_division=0))',
+            'print("\\nConfusion Matrix:")',
+            'print(confusion_matrix(y_test, y_pred))',
+        ]
+    else:
+        metric_import = (
+            "from sklearn.metrics import (r2_score, mean_absolute_error, "
+            "mean_absolute_percentage_error, mean_squared_error)"
+        )
+        evaluation_lines = [
+            "mse = mean_squared_error(y_test, y_pred)",
+            'print("R²:", r2_score(y_test, y_pred))',
+            'print("MAE:", mean_absolute_error(y_test, y_pred))',
+            'print("MSE:", mse)',
+            'print("RMSE:", np.sqrt(mse))',
+            "if np.any(np.asarray(y_test) == 0):",
+            '    print("MAPE: n/a (Actual enthält Nullwerte)")',
+            "else:",
+            '    print("MAPE:", mean_absolute_percentage_error(y_test, y_pred))',
+        ]
+
+    evaluation_code = "\n".join(evaluation_lines)
+    stratify_code = "y" if use_stratify else "None"
+
+    generated_code = f'''import numpy as np
+import pandas as pd
+
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, RobustScaler, StandardScaler
+{model_import}
+{metric_import}
+
+
+# 1. Daten laden
+df = pd.read_csv("deine_daten.csv")
+# Excel alternativ:
+# df = pd.read_excel("deine_daten.xlsx", sheet_name=0)
+
+
+# 2. Target und Features
+target = {target!r}
+features = {list(features)!r}
+
+X = df[features]
+y = df[target]
+
+valid = y.notna()
+X = X.loc[valid].copy()
+y = y.loc[valid].copy()
+
+
+# 3. Train-/Test-Split
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size={float(test_size)!r},
+    random_state={seed},
+    stratify={stratify_code},
+)
+
+
+# 4. Feature-Gruppen
+numeric_features = {list(num_cols)!r}
+categorical_features = {list(cat_cols)!r}
+
+
+# 5. Numerisches Preprocessing
+numeric_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy={imputer_strategy!r})),
+    ("scaler", {scaler_code}),
+])
+
+
+# 6. Kategoriales Preprocessing
+categorical_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore")),
+])
+
+
+# 7. Preprocessor
+transformers = []
+
+if numeric_features:
+    transformers.append(("num", numeric_pipeline, numeric_features))
+
+if categorical_features:
+    transformers.append(("cat", categorical_pipeline, categorical_features))
+
+preprocessor = ColumnTransformer(transformers=transformers)
+
+
+# 8. Modell
+model = {model_code}
+
+
+# 9. Komplette Pipeline
+pipeline = Pipeline([
+    ("preprocessor", preprocessor),
+    ("model", model),
+])
+
+
+# 10. Training
+pipeline.fit(X_train, y_train)
+
+
+# 11. Prediction
+y_pred = pipeline.predict(X_test)
+
+
+# 12. Evaluation
+{evaluation_code}
+
+
+print("\\nPipeline:")
+print(pipeline)
+'''
+
+    st.code(generated_code, language="python", line_numbers=True)
+
+    st.download_button(
+        "Python-Code herunterladen",
+        data=generated_code,
+        file_name="generated_ml_pipeline.py",
+        mime="text/x-python",
+        width="stretch",
+    )
+
